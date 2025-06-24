@@ -800,8 +800,62 @@ class Tree(nn.Module):
         
         return y_tree
      
-        
-        
+
+
+class DAFM(nn.Module):
+    def __init__(self, num_stages=4, embed_dim=96):
+        super(DAFM, self).__init__()
+        self.num_stages = num_stages
+        self.embed_dim = embed_dim
+        self.fusion_layer = nn.Sequential(
+            nn.Linear(num_stages, num_stages),
+            nn.Softmax(dim=1)
+        )
+
+    def forward(self, attn_maps):
+        """
+        attn_maps: list of attention maps from each stage, each of shape [B, H, W]
+        """
+        B = attn_maps[0].shape[0]
+        weights = []
+
+        for attn in attn_maps:
+            # Flatten and calculate entropy as dispersion
+            entropy = -torch.sum(attn * torch.log(attn + 1e-6), dim=[1, 2])
+            weights.append(entropy.unsqueeze(1))  # shape: [B, 1]
+
+        weights = torch.cat(weights, dim=1)  # [B, num_stages]
+        norm_weights = self.fusion_layer(weights)  # [B, num_stages]
+
+        # Fuse the attention maps
+        fused = 0
+        for i in range(self.num_stages):
+            fused += norm_weights[:, i].unsqueeze(1).unsqueeze(2) * attn_maps[i]  # [B, H, W]
+
+        return fused  # fused attention map
+       
+class AIPI(nn.Module):
+    def __init__(self, embed_dim):
+        super(AIPI, self).__init__()
+        self.fc1 = nn.Linear(embed_dim * 2, embed_dim)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(embed_dim, embed_dim)
+
+    def forward(self, x_a, x_b, f_a, f_b):
+        """
+        x_a, x_b: global features [B, D]
+        f_a, f_b: fused attention maps [B, H, W]
+        """
+        # Combine global features with pooled attention responses
+        f_a_pool = F.adaptive_avg_pool2d(f_a.unsqueeze(1), (1, 1)).squeeze(-1).squeeze(-1)  # [B, 1]
+        f_b_pool = F.adaptive_avg_pool2d(f_b.unsqueeze(1), (1, 1)).squeeze(-1).squeeze(-1)
+
+        x_a_enhanced = self.fc2(self.relu(self.fc1(torch.cat([x_a, f_b_pool], dim=1))))
+        x_b_enhanced = self.fc2(self.relu(self.fc1(torch.cat([x_b, f_a_pool], dim=1))))
+
+        return x_a_enhanced, x_b_enhanced
+
+
 class ViTree(nn.Module):
     def __init__(self, config, tree_depth, num_patches):
         super(ViTree, self).__init__()
